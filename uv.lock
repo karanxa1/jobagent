@@ -1207,6 +1207,7 @@ name = "jobagent"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anthropic" },
     { name = "azure-identity" },
     { name = "browser-use" },
     { name = "httpx" },
@@ -1225,6 +1226,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anthropic", specifier = ">=0.40" },
     { name = "azure-identity", specifier = ">=1.26.0" },
     { name = "browser-use", specifier = ">=0.13.10" },
     { name = "httpx", specifier = ">=0.28.1" },

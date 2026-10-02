@@ -1,4 +1,5 @@
-"""Decide which discovered jobs are worth a browser worker, using clef-flash's calibrated probabilities."""
+"""Decide which discovered jobs are worth a browser worker, using the decider's calibrated probabilities
+(clef-flash on Cloudflare, or the main LLM; see llm.make_decider)."""
 from __future__ import annotations
 
 import asyncio
@@ -7,7 +8,7 @@ import logging
 
 from jobagent.config import Config
 from jobagent.db import DB
-from jobagent.llm import Clef, confident
+from jobagent.llm import Decider, confident
 from jobagent.models import Status
 
 log = logging.getLogger(__name__)
@@ -137,7 +138,7 @@ def rescore(cfg: Config, db: DB) -> tuple[int, int]:
     return up, down
 
 
-async def retriage_missing(cfg: Config, db: DB, clef: Clef) -> int:
+async def retriage_missing(cfg: Config, db: DB, clef: Decider) -> int:
     """Ask only the newer questions (role_type, ai_first_company) for already-queued jobs, then re-decide."""
     newq = {k: questions(cfg)[k] for k in ("role_type", "ai_first_company")}
     rows = [r for r in db.jobs_with_status(Status.QUEUED)
@@ -157,7 +158,7 @@ async def retriage_missing(cfg: Config, db: DB, clef: Clef) -> int:
     return len(rows)
 
 
-async def triage_pending(cfg: Config, db: DB, clef: Clef) -> tuple[int, int]:
+async def triage_pending(cfg: Config, db: DB, clef: Decider) -> tuple[int, int]:
     rows = db.jobs_with_status(Status.NEW)
     if not rows:
         return 0, 0
@@ -173,7 +174,9 @@ async def triage_pending(cfg: Config, db: DB, clef: Clef) -> tuple[int, int]:
             a = await clef.ask(model, state, qs)
             # Cascade: clef-flash (~40ms) settles most jobs; borderline ones get the 27B clef's opinion.
             p_no = a["eligible"]["probabilities"].get("no", 0)
-            if not confident(a["ai_role"]) or 0.45 < p_no < 0.75:
+            # (skipped when both names resolve to the same LLM: asking it twice adds nothing)
+            resolve = getattr(clef, "resolve", None)
+            if (not confident(a["ai_role"]) or 0.45 < p_no < 0.75) and not (resolve and resolve(model) == resolve(second)):
                 a = await clef.ask(second, state, qs)
                 a["_model"] = second
         except Exception as e:  # noqa: BLE001 - leave it NEW, retry next pass

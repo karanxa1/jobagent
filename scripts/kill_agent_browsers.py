@@ -1,4 +1,12 @@
-"""Kill every agent-launched Chrome (Chrome binary + agent --user-data-dir only). Used by start.sh / stop.sh."""
-from jobagent.browsers import _agent_chrome_pids, kill_tree
+"""Kill agent-launched Chromes that no live daemon owns (orphans of a crash / hard kill). Works on every OS.
 
-print(f"killed {sum(kill_tree(pid, timeout=3) for pid in _agent_chrome_pids())} agent browser processes")
+Browsers of running daemons (this install's or any other's) are left alone; use `jobagent stop` to stop a daemon
+together with its browsers. --dry-run only lists them.
+"""
+import sys
+
+from jobagent.browsers import kill_orphans
+
+dry = "--dry-run" in sys.argv[1:]
+pids = kill_orphans(dry_run=dry)
+print(f"{'would kill' if dry else 'killed'} {len(pids)} orphaned agent browser(s){': ' + str(pids) if pids else ''}")

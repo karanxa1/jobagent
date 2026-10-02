@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-# Stop every daemon shard AND every agent-launched Chrome (never touches your own Chrome profile).
+# Stop every daemon shard AND every orphaned agent-launched Chrome. Thin wrapper around `jobagent stop`.
+# Never touches your own Chrome, the login window, or the browsers of a daemon running from another directory.
 cd "$(dirname "$0")/.."
-if [[ -f logs/agent.pid ]]; then
-  while read -r p; do
-    [[ -z "$p" ]] && continue
-    pkill -TERM -P "$p" 2>/dev/null; kill "$p" 2>/dev/null && echo "stopped $p"
-  done < logs/agent.pid
-  rm -f logs/agent.pid
-fi
-uv run python scripts/kill_agent_browsers.py || true
+exec uv run jobagent stop "$@"

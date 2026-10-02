@@ -18,7 +18,7 @@ from jobagent.applier import Applier
 from jobagent.config import Config, load_profile
 from jobagent.db import DB
 from jobagent.ledger import Ledger
-from jobagent.llm import Clef, Luna
+from jobagent.llm import Clef, Luna, make_decider
 from jobagent.models import Job, Status
 from jobagent.otp import make_otp_provider
 from jobagent.profile import resume_text, todos
@@ -29,7 +29,7 @@ from jobagent.triage import rescore, retriage_missing, triage_pending
 log = logging.getLogger(__name__)
 
 # One Python event loop can't drive ~40 browser-use agents (CDP keepalives time out and every browser drops at
-# once), so scripts/start.sh runs apply.processes daemons. Shard 0 also discovers, triages, sends email and
+# once), so `jobagent start` runs apply.processes daemons. Shard 0 also discovers, triages, sends email and
 # watches for leaked browsers; every shard applies. Workers and per-site limits are split between shards.
 SHARD = int(os.environ.get("JOBAGENT_SHARD", "0"))
 SHARDS = max(1, int(os.environ.get("JOBAGENT_SHARDS", "1")))
@@ -187,17 +187,20 @@ class HostLimiter:
 
 
 async def apply_queue(cfg: Config, db: DB, luna: Luna, clef: Clef, workers: int | None = None,
-                      limit: int | None = None) -> dict[str, int]:
+                      limit: int | None = None, otp=None) -> dict[str, int]:
+    """otp: an already-started provider owned by the caller (the daemon keeps one Gmail browser across passes)."""
     profile = load_profile(cfg)
     if missing := todos(profile):
         log.warning("profile.yaml still has TODOs %s: questions needing them will be flagged for you", missing)
-    otp = make_otp_provider(cfg, luna, clef)
-    try:
-        await otp.start()
-    except Exception as e:  # noqa: BLE001
-        log.warning("OTP provider failed to start (%s): applications needing email codes will be flagged", e)
-        from jobagent.otp import NoOTP
-        otp = NoOTP(cfg, luna)
+    own_otp = otp is None
+    if own_otp:
+        otp = make_otp_provider(cfg, luna, clef)
+        try:
+            await otp.start()
+        except Exception as e:  # noqa: BLE001
+            log.warning("OTP provider failed to start (%s): applications needing email codes will be flagged", e)
+            from jobagent.otp import NoOTP
+            otp = NoOTP(cfg, luna)
     applier = Applier(cfg, luna, clef, otp, profile, resume_text(cfg.resume_path))
     ledger = Ledger(cfg.ledger_path)
     already = lambda r: ledger.has(Job(**json.loads(r["data"])))
@@ -303,7 +306,8 @@ async def apply_queue(cfg: Config, db: DB, luna: Luna, clef: Clef, workers: int 
     try:
         await asyncio.gather(*(worker(SHARD * workers + i) for i in range(workers)))
     finally:
-        await otp.stop()
+        if own_otp:
+            await otp.stop()
     return dict(stats)
 
 
@@ -345,7 +349,8 @@ def send_outbox(cfg: Config, db: DB) -> int:
 
 
 async def run_once(cfg: Config, db: DB, *, do_discover=True, workers=None, limit=None) -> dict:
-    luna, clef = Luna(cfg), Clef(cfg)
+    luna = Luna(cfg)
+    clef = make_decider(cfg, luna)
     try:
         db.requeue_stale()
         if do_discover:
@@ -362,7 +367,8 @@ async def run_once(cfg: Config, db: DB, *, do_discover=True, workers=None, limit
 async def daemon(cfg: Config, db: DB, workers=None):
     """Discovery and applying run side by side: browsers never wait for a (slow) discovery pass."""
     interval = cfg.get("daemon.interval_minutes", 180) * 60
-    luna, clef = Luna(cfg), Clef(cfg)
+    luna = Luna(cfg)
+    clef = make_decider(cfg, luna)
     if SHARD == 0:  # the other shards start after this, so nothing of theirs is in progress yet
         db.requeue_stale()
 
@@ -404,20 +410,54 @@ async def daemon(cfg: Config, db: DB, workers=None):
                           n, limit, killed)
             await asyncio.to_thread(browsers.prune_agent_tmp)
 
+    # otp.provider gmail_web: one headless Chrome holds the Gmail session for the daemon's whole life. With several
+    # shards only shard 0 holds it (make_otp_provider gives the others BridgeOTP) and answers their requests
+    # through the bridge queue, like `jobagent otp-relay`.
+    gmail_otp = None
+    if cfg.get("otp.provider") == "gmail_web" and SHARD == 0:
+        from jobagent.gmail_web import GmailWebOTP
+
+        gmail_otp = make_otp_provider(cfg, luna, clef)
+        if isinstance(gmail_otp, GmailWebOTP):
+            try:
+                await gmail_otp.start()
+            except Exception as e:  # noqa: BLE001
+                log.warning("Gmail reader failed to start (%s): applications needing email codes will be flagged", e)
+                from jobagent.otp import NoOTP
+                gmail_otp = NoOTP(cfg, luna)
+        # else: another process (e.g. `jobagent otp-relay`) holds the Gmail profile; ask it through the bridge
+
+    async def otp_relay_loop():
+        from jobagent.gmail_web import GmailWebOTP
+        from jobagent.otp import serve_bridge
+
+        if not isinstance(gmail_otp, GmailWebOTP):
+            return
+        while True:
+            try:
+                await serve_bridge(cfg, gmail_otp)
+            except Exception:  # noqa: BLE001
+                log.exception("otp relay failed; restarting it")
+                await asyncio.sleep(10)
+
     async def apply_loop():
         while True:
             try:
-                stats = await apply_queue(cfg, db, luna, clef, workers)
+                stats = await apply_queue(cfg, db, luna, clef, workers, otp=gmail_otp)
                 log.info("apply pass done: %s | totals %s", stats, db.counts())
             except Exception:  # noqa: BLE001
                 log.exception("apply pass failed")
             await asyncio.sleep(60)  # queue drained or all hosts capped: check again shortly
 
     browsers.install_shutdown_hooks()  # SIGTERM/SIGINT/exit: kill every browser this process launched
+    if cfg.get("daemon.keep_awake", True):
+        from jobagent.osutil import keep_awake
+
+        keep_awake()  # no idle sleep while this process lives (caffeinate / systemd-inhibit / SetThreadExecutionState)
     log.info("daemon shard %d/%d up", SHARD, SHARDS)
     if SHARD:
         await asyncio.gather(apply_loop())
         return
     browsers.sweep_orphans()            # and any left behind by a previous run that died hard
     await triage_all()  # never apply to a job scored under older rules
-    await asyncio.gather(discovery_loop(), apply_loop(), outbox_loop(), browser_watchdog())
+    await asyncio.gather(discovery_loop(), apply_loop(), outbox_loop(), browser_watchdog(), otp_relay_loop())

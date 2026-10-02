@@ -61,7 +61,10 @@ def profile():
 
 
 @app.command()
-def login(sites: list[str] = typer.Argument(None, help=f"any of {list(LOGIN_SITES)} (default: all)")):
+def login(sites: list[str] = typer.Argument(None, help=f"any of {list(LOGIN_SITES)} (default: all)"),
+          export_only: bool = typer.Option(False, "--export-only",
+                                           help="don't open Chrome: just export the cookies already in the login "
+                                                "profile (e.g. the window was closed by something else)")):
     """Log in to job boards / Google once in your normal Chrome; cookies are shared with all parallel workers.
 
     The login window is plain Google Chrome with no automation attached (Google refuses sign-in in automated
@@ -71,25 +74,61 @@ def login(sites: list[str] = typer.Argument(None, help=f"any of {list(LOGIN_SITE
 
     from playwright.sync_api import sync_playwright
 
+    from jobagent import browsers
+    from jobagent.config import chrome_path
+    from jobagent.osutil import IS_MAC
+
+    import psutil
+
     cfg, _ = _setup()
     chosen = sites or list(LOGIN_SITES)
     if bad := [s for s in chosen if s not in LOGIN_SITES]:
         con.print(f"[red]unknown sites {bad}; choose from {list(LOGIN_SITES)}[/]")
         raise typer.Exit(1)
     prof = cfg.login_profile_dir
-    prof.mkdir(parents=True, exist_ok=True)
-    chrome = cfg.get("apply.chrome_path", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-    proc = subprocess.Popen([chrome, f"--user-data-dir={prof}", "--no-first-run", "--no-default-browser-check",
-                             "--new-window", *[LOGIN_SITES[s] for s in chosen]],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    con.print(f"A Chrome window opened with {', '.join(chosen)}. Log in on every tab with the email in profile.yaml\n"
-              "(for Google: finish any 2-step prompt), then [bold]quit that Chrome window (Cmd+Q)[/].")
-    while proc.poll() is None:
+    chrome = chrome_path(cfg)
+    if not chrome or not Path(chrome).exists():
+        con.print(f"[red]Google Chrome not found{f' at {chrome}' if chrome else ''}. Install it, or set "
+                  "apply.chrome_path in config.yaml / config.local.yaml.[/]")
+        raise typer.Exit(1)
+
+    def login_chrome_pids() -> list[int]:
+        out = []
+        for pr in psutil.process_iter():
+            try:
+                if browsers.uses_profile(pr.cmdline(), prof):
+                    out.append(pr.pid)
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+
+    if export_only:
+        if not prof.exists():
+            con.print(f"[red]{prof} does not exist: run `jobagent login` first.[/]")
+            raise typer.Exit(1)
+    else:
+        prof.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.Popen([chrome, f"--user-data-dir={prof}", "--no-first-run", "--no-default-browser-check",
+                                 "--new-window", *[LOGIN_SITES[s] for s in chosen]],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        how = "quit that Chrome (Cmd+Q)" if IS_MAC else "close that Chrome window (every window of it)"
+        con.print(f"A Chrome window opened with {', '.join(chosen)}. Log in on every tab with the email in "
+                  f"profile.yaml\n(for Google: finish any 2-step prompt), then [bold]{how}[/].")
+        while proc.poll() is None:
+            _time.sleep(1)
+    # the launched process may have handed off to a Chrome already running on this profile: wait for that too
+    waited = 0
+    while login_chrome_pids():
+        if waited % 30 == 0:
+            con.print("waiting for the login Chrome to exit..." if not export_only else
+                      "[yellow]a Chrome is still running on the login profile; close it to export.[/]")
         _time.sleep(1)
+        waited += 1
     _time.sleep(2)  # let Chrome flush its cookie database
     with sync_playwright() as p:
-        # Playwright's default --use-mock-keychain makes Chrome unable to decrypt the real cookies, and Chrome
-        # then DELETES them; use the real macOS keychain so the login survives the export
+        # Playwright's default --use-mock-keychain (macOS) / --password-store=basic (Linux) make Chrome unable to
+        # decrypt the real cookies, and Chrome then DELETES them; use the OS keychain so the login survives the
+        # export (Windows uses DPAPI for the same user either way)
         ctx = p.chromium.launch_persistent_context(str(prof), headless=True, executable_path=chrome,
                                                    ignore_default_args=["--use-mock-keychain", "--password-store=basic"])
         state = ctx.storage_state()
@@ -98,14 +137,18 @@ def login(sites: list[str] = typer.Argument(None, help=f"any of {list(LOGIN_SITE
         con.print("[red]No cookies were saved: nothing to export (did you log in in that Chrome window?). "
                   "Existing sessions left untouched.[/]")
         raise typer.Exit(1)
-    cfg.storage_state_path.write_text(_json.dumps(state))
-    cfg.storage_state_path.chmod(0o600)
+    cfg.storage_state_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.storage_state_path.write_text(_json.dumps(state), encoding="utf-8")
+    try:
+        cfg.storage_state_path.chmod(0o600)  # POSIX: owner-only; Windows: only clears read-only (harmless)
+    except OSError:
+        pass
     done_file = cfg.storage_state_path.with_name("logged_in_sites.json")
-    done = set(_json.loads(done_file.read_text())) if done_file.exists() else set()
-    done_file.write_text(_json.dumps(sorted(done | set(chosen))))
-    n = len(_json.loads(cfg.storage_state_path.read_text()).get("cookies", []))
+    done = set(_json.loads(done_file.read_text(encoding="utf-8"))) if done_file.exists() else set()
+    done_file.write_text(_json.dumps(sorted(done | set(chosen))), encoding="utf-8")
+    n = len(state.get("cookies", []))
     con.print(f"[green]saved {n} cookies -> {cfg.storage_state_path}; logged in: {sorted(done | set(chosen))}[/]\n"
-              "Restart the daemon (scripts/stop.sh && scripts/start.sh) so workers pick them up.")
+              "Restart the daemon (jobagent stop, then jobagent start) so workers pick them up.")
 
 
 @app.command("gmail-auth")
@@ -117,7 +160,113 @@ def gmail_auth():
     if not keys.exists():
         con.print(f"[red]Put your Google OAuth client JSON (Desktop app, Gmail API enabled) at {keys} first.[/]")
         raise typer.Exit(1)
-    subprocess.run([c.get("command", "npx"), *c.get("args", []), "auth"], check=False)
+    from jobagent.osutil import resolve_exe
+
+    subprocess.run([resolve_exe(c.get("command", "npx")), *c.get("args", []), "auth"], check=False)
+
+
+@app.command("gmail-login")
+def gmail_login(check: bool = typer.Option(False, "--check", help="don't open Chrome; only test the saved session")):
+    """Sign in to Gmail once in plain Chrome, for otp.provider gmail_web / `jobagent otp-relay`.
+
+    Uses its own profile (otp.gmail_web.profile_dir), never exported to the workers' cookie file: the session only
+    ever lives in this one browser profile. Afterwards a headless Chrome on the same profile reads codes from it."""
+    import time as _time
+
+    from jobagent.config import chrome_path
+    from jobagent.gmail_web import GmailWebOTP, profile_in_use
+    from jobagent.osutil import IS_MAC
+    from jobagent.otp import gmail_profile_dir
+
+    cfg, _ = _setup()
+    prof = gmail_profile_dir(cfg)
+    chrome = chrome_path(cfg)
+    if not chrome or not Path(chrome).exists():
+        con.print(f"[red]Google Chrome not found{f' at {chrome}' if chrome else ''}. Install it, or set "
+                  "apply.chrome_path in config.yaml / config.local.yaml.[/]")
+        raise typer.Exit(1)
+    if profile_in_use(prof):
+        con.print(f"[red]{prof} is in use by another Chrome: a running daemon / `jobagent otp-relay` holds the Gmail "
+                  "session (it lets go by itself within ~3 minutes once the session has expired), or a gmail-login "
+                  "window is still open. Stop it or close that window, then run this again.[/]")
+        raise typer.Exit(1)
+    if not check:
+        prof.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.Popen([chrome, f"--user-data-dir={prof}", "--no-first-run", "--no-default-browser-check",
+                                 "--new-window", "https://mail.google.com/mail/u/0/"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        how = "quit that Chrome (Cmd+Q)" if IS_MAC else "close that Chrome window (every window of it)"
+        con.print("A Chrome window opened at Gmail. Sign in with the address the applications use (finish any "
+                  f"2-step prompt) and wait for your inbox to show, then [bold]{how}[/].")
+        while proc.poll() is None:
+            _time.sleep(1)
+        while profile_in_use(prof):  # it may have handed off to a Chrome already running on this profile
+            _time.sleep(1)
+        _time.sleep(2)  # let Chrome flush its cookie database
+
+    async def probe():
+        otp = GmailWebOTP(cfg, None)
+        if not await otp._connect():
+            return None
+        try:
+            feed = await otp.gw.feed()
+            ok_full = bool(feed) and bool(await otp.gw.message(feed[0]["id"]))
+            return len(feed), ok_full, bool(otp.gw.ik)
+        finally:
+            await otp.gw.stop()
+
+    res = asyncio.run(probe())
+    if res is None:
+        con.print("[red]Gmail is not signed in on that profile. Run `jobagent gmail-login` and sign in.[/]")
+        raise typer.Exit(1)
+    n, ok_full, ik = res
+    con.print(f"[green]Gmail session OK[/]: {n} unread in the inbox feed"
+              + (f"; full message read {'OK' if ok_full else '[yellow]FAILED[/] (codes in subjects/previews still work)'}"
+                 if n else "") + ("" if ik else " [yellow](no account key found; search may be limited)[/]")
+              + "\nSet otp.provider: gmail_web in config.yaml (or run `jobagent otp-relay` next to a bridge daemon).")
+
+
+@app.command("otp-relay")
+def otp_relay(via: str = typer.Option("gmail_web", "--via", help="gmail_web (your Gmail browser session) or imap "
+                                                                 "(GMAIL_APP_PASSWORD)"),
+              once: bool = typer.Option(False, "--once", help="answer what is pending now, then exit"),
+              wait: int = typer.Option(120, "--wait", help="seconds to wait for each email before answering failed"),
+              db_path: str = typer.Option(None, "--db", help="jobs.db to serve (default: config db)")):
+    """Keep Gmail open and answer verification-code requests from the bridge queue (otp.provider: bridge).
+
+    Any number of daemons / processes on this machine using `otp.provider: bridge` and the same jobs.db then share
+    one Gmail session, like the Claude Code helper in docs/claude-helpers.md, but without Claude."""
+    import os as _os
+
+    from jobagent.llm import Luna, make_decider
+    from jobagent.otp import IMAPGmail, serve_bridge
+
+    cfg, _ = _setup()
+    if db_path:
+        cfg.raw["db"] = str(Path(db_path).expanduser().resolve())
+    if via not in ("gmail_web", "imap"):
+        con.print("[red]--via must be gmail_web or imap[/]")
+        raise typer.Exit(1)
+    if via == "imap" and not _os.environ.get("GMAIL_APP_PASSWORD"):
+        con.print("[red]--via imap needs GMAIL_APP_PASSWORD in .env (and otp.imap.user in config).[/]")
+        raise typer.Exit(1)
+
+    async def go():
+        from jobagent.gmail_web import GmailWebOTP
+
+        luna = Luna(cfg)
+        clef = make_decider(cfg, luna)
+        provider = GmailWebOTP(cfg, luna, clef) if via == "gmail_web" else IMAPGmail(cfg, luna, clef)
+        await provider.start()
+        logging.getLogger(__name__).info("otp-relay up: %s, db %s", via, cfg.db_path)
+        try:
+            return await serve_bridge(cfg, provider, once=once, wait_seconds=wait)
+        finally:
+            await provider.stop()
+            await clef.aclose()
+
+    stats = asyncio.run(go())
+    con.print(stats)
 
 
 @app.command()
@@ -132,13 +281,13 @@ def discover(source: list[str] = typer.Option(None, "--source", "-s")):
 @app.command()
 def triage():
     """Score new jobs with clef-flash and queue the good ones."""
-    from jobagent.llm import Clef
+    from jobagent.llm import make_decider
     from jobagent.triage import triage_pending
 
     cfg, db = _setup()
 
     async def go():
-        clef = Clef(cfg)
+        clef = make_decider(cfg)
         try:
             return await triage_pending(cfg, db, clef)
         finally:
@@ -149,7 +298,7 @@ def triage():
 
     async def go2():
         from jobagent.triage import retriage_missing
-        clef = Clef(cfg)
+        clef = make_decider(cfg)
         try:
             return await retriage_missing(cfg, db, clef)
         finally:
@@ -173,7 +322,7 @@ def apply(workers: int = typer.Option(None, "--workers", "-w"), limit: int = typ
           dry_run: bool = typer.Option(False, "--dry-run", help="fill forms but don't submit"),
           headful: bool = typer.Option(False, "--headful", help="show the browsers")):
     """Apply to queued jobs with parallel browsers."""
-    from jobagent.llm import Clef, Luna
+    from jobagent.llm import Luna, make_decider
     from jobagent.orchestrator import apply_queue
 
     cfg, db = _setup()
@@ -184,7 +333,7 @@ def apply(workers: int = typer.Option(None, "--workers", "-w"), limit: int = typ
     db.requeue_stale()
 
     async def go():
-        clef = Clef(cfg)
+        clef = make_decider(cfg)
         try:
             return await apply_queue(cfg, db, Luna(cfg), clef, workers, limit)
         finally:
@@ -199,7 +348,7 @@ def apply_url(url: str, company: str = typer.Option(..., "--company", "-c"), tit
     """Apply to one specific posting (defaults to a visible, dry run: good for testing)."""
     from jobagent.applier import Applier
     from jobagent.config import load_profile
-    from jobagent.llm import Clef, Luna
+    from jobagent.llm import Luna, make_decider
     from jobagent.otp import make_otp_provider
     from jobagent.profile import resume_text
 
@@ -212,7 +361,7 @@ def apply_url(url: str, company: str = typer.Option(..., "--company", "-c"), tit
     db.upsert_jobs([job])
 
     async def go():
-        luna, clef = Luna(cfg), Clef(cfg)
+        luna, clef = Luna(cfg), make_decider(cfg)
         otp = make_otp_provider(cfg, luna, clef)
         await otp.start()
         try:
@@ -269,7 +418,7 @@ def retry(statuses: list[str] = typer.Argument(None, help="default: failed needs
 @app.command()
 def assist(limit: int = typer.Option(20, "--limit", "-n")):
     """Re-run captcha-blocked applications in a visible Chrome; you solve the captcha, the agent does the rest."""
-    from jobagent.llm import Clef, Luna
+    from jobagent.llm import Luna, make_decider
     from jobagent.orchestrator import apply_queue
 
     cfg, db = _setup()
@@ -285,7 +434,7 @@ def assist(limit: int = typer.Option(20, "--limit", "-n")):
     con.print(f"[bold]{len(rows)} captcha jobs.[/] A Chrome window opens for each; solve the captcha when you hear the chime.")
 
     async def go():
-        clef = Clef(cfg)
+        clef = make_decider(cfg)
         try:
             return await apply_queue(cfg, db, Luna(cfg), clef, 1, len(rows))
         finally:
@@ -299,7 +448,7 @@ def manual(limit: int = typer.Option(100, "--limit", "-n"), letters: bool = type
     """Write MANUAL_APPLY.md: best queued jobs on sites that block automation, with a tailored cover letter each."""
     from jobagent.applier import Applier
     from jobagent.config import load_profile
-    from jobagent.llm import Clef, Luna
+    from jobagent.llm import Luna, make_decider
     from jobagent.otp import NoOTP
     from jobagent.profile import resume_text
 
@@ -311,7 +460,7 @@ def manual(limit: int = typer.Option(100, "--limit", "-n"), letters: bool = type
     out = cfg.root / "MANUAL_APPLY.md"
 
     async def go():
-        luna, clef = Luna(cfg), Clef(cfg)
+        luna, clef = Luna(cfg), make_decider(cfg)
         ap = Applier(cfg, luna, clef, NoOTP(cfg, luna), load_profile(cfg), resume_text(cfg.resume_path))
         sem = asyncio.Semaphore(16)
 
@@ -360,13 +509,13 @@ def mark_applied(url: str):
 def inbox(days: int = 7):
     """Classify recruiter replies (interview / assessment / rejection) and attach them to applied jobs."""
     from jobagent.inbox import scan
-    from jobagent.llm import Clef, Luna
+    from jobagent.llm import Luna, make_decider
     from jobagent.otp import make_otp_provider
 
     cfg, db = _setup()
 
     async def go():
-        luna, clef = Luna(cfg), Clef(cfg)
+        luna, clef = Luna(cfg), make_decider(cfg)
         otp = make_otp_provider(cfg, luna, clef)
         await otp.start()
         try:
@@ -479,7 +628,75 @@ def outbox_sent(outbox_id: int):
     con.print("ok")
 
 
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def start(ctx: typer.Context,
+          processes: int = typer.Option(None, "--processes", "-p", help="daemon shards (default: apply.processes)"),
+          stagger: float = typer.Option(20, help="seconds between shard 0 and the others (shard 0 requeues stale jobs)")):
+    """Run the daemon in the background (macOS / Linux / Windows). Extra args go to `jobagent run --daemon`."""
+    from jobagent import daemonctl
+    from jobagent.osutil import IS_WIN
+
+    cfg = load_config()
+    res = daemonctl.start(cfg, list(ctx.args), stagger_s=stagger, processes=processes, echo=con.print)
+    if res.already:
+        con.print(f"already running (pid {', '.join(map(str, res.already))})")
+        return
+    log = daemonctl.log_file(cfg)
+    if res.died:
+        con.print(f"[red]daemon(s) {res.died} exited right away; last lines of {log}:[/]")
+        lines = log.read_text(encoding="utf-8", errors="replace").splitlines()[-25:] if log.exists() else []
+        con.print("\n".join(lines), markup=False, highlight=False)
+        raise typer.Exit(1)
+    follow = f"Get-Content '{log}' -Wait -Tail 50" if IS_WIN else f"tail -f '{log}'"
+    con.print(f"started {len(res.pids)} daemon(s): {' '.join(map(str, res.pids))}; follow with: {follow}")
+
+
+@app.command()
+def stop(dry_run: bool = typer.Option(False, "--dry-run", help="only show what would be killed")):
+    """Stop every daemon shard (whole process trees) and every orphaned agent Chrome. Your own Chrome, the login
+    window and the browsers of daemons still running elsewhere are never touched."""
+    from jobagent import daemonctl
+
+    cfg = load_config()
+    res = daemonctl.stop(cfg, echo=con.print, dry_run=dry_run)
+    if not res.stopped and not dry_run:
+        con.print("no daemon was running")
+    if not dry_run:
+        con.print(f"killed {len(res.orphans_killed)} orphaned agent browser(s)")
+
+
+@app.command("daemon-status")
+def daemon_status():
+    """Is the background daemon running, and how many agent browsers are alive."""
+    from jobagent import daemonctl
+
+    st = daemonctl.status(load_config())
+    if not st["pids"]:
+        con.print(f"not running (no {st['pid_file']})" if not st["untracked_here"] else "pid file missing")
+    for pid, alive in st["pids"].items():
+        con.print(f"daemon pid {pid}: {'[green]running[/]' if alive else '[red]not running[/]'}")
+    if st["untracked_here"]:
+        con.print(f"[yellow]daemon(s) running from this install but not in the pid file: {st['untracked_here']}[/]")
+    con.print(f"agent browsers: {st['agent_browsers_total']} on this machine, {st['agent_browsers_ours']} owned by "
+              f"this install's daemon(s), {st['agent_browsers_orphaned']} orphaned (no live daemon)")
+    for pid, cwd in st["other_daemons"]:
+        con.print(f"other jobagent daemon: pid {pid} in {cwd}")
+    con.print(f"log: {st['log_file']}")
+
+
 def main():
+    import os
+    import sys
+
+    if os.name == "nt" and not sys.flags.utf8_mode:
+        # Windows defaults file I/O to the ANSI code page (cp1252...): non-ASCII names, cover letters and ledger
+        # lines would crash or garble. Re-run in UTF-8 mode; Ctrl+C reaches the child directly (same console).
+        import signal
+
+        child = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "jobagent.cli", *sys.argv[1:]],
+                                 env={**os.environ, "PYTHONUTF8": "1"})
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        sys.exit(child.wait())
     app()
 
 

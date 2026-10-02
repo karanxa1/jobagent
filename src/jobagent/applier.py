@@ -14,9 +14,9 @@ import yaml
 from pydantic import BaseModel, Field
 
 from jobagent import browsers
-from jobagent.config import Config
+from jobagent.config import Config, chrome_path
 from jobagent.db import host_of
-from jobagent.llm import Clef, Luna, browser_llm
+from jobagent.llm import Clef, Luna, browser_fallback_llm, browser_llm
 from jobagent.models import normalize_company, ApplyResult, Job, Status
 from jobagent.otp import OTPProvider
 from jobagent.style import HUMAN_QUESTION, HUMAN_STYLE, clean, tells
@@ -613,12 +613,10 @@ async def block_mailto(session) -> None:
 
 
 def notify(title: str, msg: str) -> None:
-    """macOS notification + sound so you notice a captcha in assist mode."""
-    import subprocess
+    """Desktop notification + sound so you notice a captcha in assist mode (macOS / Windows / Linux)."""
+    from jobagent.osutil import notify as _notify
 
-    safe = lambda x: x.replace('"', "'")[:180]
-    subprocess.run(["osascript", "-e", f'display notification "{safe(msg)}" with title "{safe(title)}" sound name "Glass"'],
-                   check=False, capture_output=True)
+    _notify(title, msg)
 
 
 def _load_login_state(cfg: Config) -> dict | None:
@@ -933,11 +931,11 @@ class Applier:
         storage = self.cfg.storage_state_path
         # Captcha avoidance: real Google Chrome (not bundled Chromium), one persistent profile per worker so
         # cookies and reCAPTCHA trust build up over time, human-ish pacing, and per-site spacing (orchestrator).
-        chrome = self.cfg.get("apply.chrome_path", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        chrome = chrome_path(self.cfg)  # apply.chrome_path, else the OS's usual Chrome install
         headless = self.cfg.get("apply.headless", True) and dom not in set(self.cfg.get("apply.headful_hosts", []) or [])
         bprofile = BrowserProfile(
             headless=headless,
-            executable_path=chrome if Path(chrome).exists() else None,
+            executable_path=chrome if chrome and Path(chrome).exists() else None,
             user_data_dir=str(self.cfg.path("logins.worker_profiles", "browser_profiles/workers") / f"w{worker_id}"),
             # job-board logins from `jobagent login`, passed as a dict: given a file path, browser-use writes every
             # worker's cookies back into that shared file (it grew to 4.5 MB and froze the daemon)
@@ -957,7 +955,7 @@ class Applier:
         agent = Agent(
             task=task,
             llm=browser_llm(self.cfg),
-            fallback_llm=browser_llm(self.cfg, self.cfg.get("azure.fallback_deployment")) if self.cfg.get("azure.fallback_deployment") else None,
+            fallback_llm=browser_fallback_llm(self.cfg),  # llm.fallback_model / azure.fallback_deployment, or None
             browser_session=session,
             tools=tools,
             available_file_paths=[resume],

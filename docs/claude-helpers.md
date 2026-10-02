@@ -1,7 +1,8 @@
 # Optional: Claude Code helpers for email codes and email applications
 
-You don't need these if you use `otp.provider: imap` and set `GMAIL_APP_PASSWORD`. In that setup the daemon
-reads verification codes and sends email applications itself.
+You don't need these. `otp.provider: gmail_web` (after `uv run jobagent gmail-login`) or `imap` (with
+`GMAIL_APP_PASSWORD`) read codes inside the daemon, and `uv run jobagent otp-relay` serves the bridge queue without
+Claude. Use the prompts below if you'd rather have a Claude Code session do it.
 
 If you'd rather not create a Gmail app password, a [Claude Code](https://claude.com/claude-code) session with the
 Gmail connector can do both jobs. Set `otp.provider: bridge` in `config.yaml`, start the daemon, then paste each

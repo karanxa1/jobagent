@@ -1,4 +1,4 @@
-"""Classify replies to applications (interview / assessment / rejection / ...) with clef and link them to jobs."""
+"""Classify replies to applications (interview / assessment / rejection / ...) with the decider (clef or the main LLM) and link them to jobs."""
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from jobagent.db import DB
-from jobagent.llm import Clef
+from jobagent.llm import Decider
 from jobagent.models import Status
 from jobagent.otp import OTPProvider
 
@@ -21,7 +21,7 @@ KINDS = {
 }
 
 
-async def scan(db: DB, clef: Clef, otp: OTPProvider, days: int = 7) -> list[dict]:
+async def scan(db: DB, clef: Decider, otp: OTPProvider, days: int = 7) -> list[dict]:
     applied = db.by_status(Status.APPLIED, 5000)
     companies = sorted({r["company"] for r in applied})
     since = datetime.now(timezone.utc) - timedelta(days=days)
