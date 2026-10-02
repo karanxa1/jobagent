@@ -1,0 +1,28 @@
+# secrets and personal data: never commit
+.env
+profile.yaml
+assets/*
+!assets/.gitkeep
+*.pdf
+storage_state.json
+browser_profiles/
+unanswered_questions.yaml
+APPLIED_JOBS.md
+MANUAL_APPLY.md
+paused_hosts.json
+
+# runtime state
+*.db
+*.db-shm
+*.db-wal
+artifacts/
+logs/
+
+# python
+__pycache__/
+*.py[oc]
+.venv/
+.ruff_cache/
+*.egg-info
+build/
+dist/

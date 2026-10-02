@@ -1,0 +1,30 @@
+[project]
+name = "jobagent"
+version = "0.1.0"
+description = "An AI agent that finds AI-engineering jobs and applies to them with parallel browser agents, truthfully and at human pace."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "azure-identity>=1.26.0",
+    "browser-use>=0.13.10",
+    "httpx>=0.28.1",
+    "mcp>=2.1.1",
+    "openai>=2",
+    "playwright>=1.63.0",
+    "psutil>=5.9",
+    "pypdf>=6.16.2",
+    "python-dotenv>=1.2.2",
+    "pyyaml>=6.0.3",
+    "reportlab>=4.4.9",
+    "rich>=14.3.3",
+    "selectolax>=0.4.13",
+    "typer>=0.27.2",
+]
+
+[project.scripts]
+jobagent = "jobagent.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13.0"]
+build-backend = "uv_build"

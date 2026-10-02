@@ -1,0 +1,138 @@
+# profile.example.yaml: the agent's single source of truth for every form answer.
+#
+# Copy it:   cp profile.example.yaml profile.yaml
+# or generate a first draft from your resume:   uv run jobagent profile
+# then fix every value by hand. The agent never invents anything that isn't here or in your resume:
+# a required question it can't answer from this file is flagged for you instead of guessed.
+#
+# Everything below is FICTIONAL sample data. Replace all of it.
+
+personal:
+  first_name: Alex
+  last_name: Example
+  full_name: Alex Example
+  email: alex.example@gmail.com          # the inbox the agent signs up with and reads verification codes from
+  phone: "9876543210"                    # digits only, without the country code
+  phone_country_code: "+91"
+  city: Bengaluru
+  state: Karnataka
+  postal_code: "560001"
+  street_address: 12 Example Road, Indiranagar
+  full_address: 12 Example Road, Indiranagar, Bengaluru, Karnataka 560001, India
+  country: India
+  school_aliases: [Example Institute of Technology, EIT Bengaluru]   # other names forms may list your school under
+  linkedin: https://www.linkedin.com/in/alex-example
+  github: https://github.com/alex-example
+  website: https://alex-example.dev
+  date_of_birth: "2002-01-15"            # only typed when a form requires it
+  gender_when_required: Prefer not to say
+
+headline: AI engineer building LLM agents and the backends around them
+summary: >-
+  I build production LLM features: tool-calling agents, retrieval pipelines and the evals that keep them honest.
+  Most of my work is Python and TypeScript on top of Postgres.
+current_title: AI Engineer
+current_company: Example Labs
+
+experience:
+  - title: AI Engineer
+    company: Example Labs
+    start: 2025-01
+    end: Present
+    location: Bengaluru, India
+    highlights:
+      - Built a support agent that resolves about 2,000 tickets a day with tool calls into the order system.
+      - Cut LLM spend 40% by routing easy requests to a smaller model.
+
+education:
+  - degree: B.Tech
+    field: Computer Science
+    school: Example Institute of Technology
+    start: 2020
+    end: 2024
+    status: Completed                    # be exact: the agent never claims a degree you haven't finished
+
+certifications: []
+
+projects:
+  - name: example-rag
+    url: https://github.com/alex-example/example-rag
+    summary: Retrieval-augmented Q&A over company docs with pgvector and an eval harness.
+
+skills:
+  languages: [Python, TypeScript, SQL]
+  ai: [LLM agents, RAG, evals, prompt engineering]
+  backend: [FastAPI, Node.js, PostgreSQL]
+  frontend: [React, Next.js]
+  infra: [Docker, AWS]
+
+work_authorization:
+  country_of_citizenship: India
+  authorized_to_work_in_india: true
+  requires_visa_sponsorship_outside_india: true
+  willing_to_relocate: true
+  open_to_remote: true
+  has_valid_passport: true
+
+availability:
+  notice_period_days: 30
+  earliest_start_date: "30 days from offer"
+  currently_student: false
+  graduation_date: "2024-05"
+  total_years_experience: 1
+  open_to_internships: false
+  willing_to_work_six_days_a_week: false
+
+compensation:
+  current_ctc_inr_lpa: 12
+  expected_ctc_inr_lpa: 18
+  expected_usd_per_year: "40000"
+  salary_bands: When a form shows salary bands, pick the band containing the number above.
+  other_currencies: >-
+    Roles paid in another currency: use the minimum of the posting's range if shown; otherwise the equivalent of
+    USD 40000 a year.
+  negotiable: true
+
+eeo:                                     # voluntary self-identification; "decline" answers are always acceptable
+  gender: Decline to self-identify
+  pronouns: Decline to self-identify
+  race_ethnicity: Decline to self-identify
+  veteran_status: I am not a protected veteran
+  disability: I don't wish to answer
+
+standard_answers:
+  how_did_you_hear: Company careers page
+  previously_worked_here: false
+  has_non_compete: false
+  background_check_ok: true
+  over_18: true
+
+# Your own answers to questions the agent couldn't answer (they collect in unanswered_questions.yaml).
+# Keys are the question text or a close paraphrase; these win over everything else. Rules ("..._rule") are
+# instructions the answering model follows for a whole family of questions.
+custom_answers:
+  notice_period_rule: >-
+    Notice period is 30 days. If the options have no 30-day choice, pick the closest one that is not shorter.
+  exact_dates_rule: >-
+    When a form needs an exact day or month the profile doesn't give, use the 1st of the month. Unknown start
+    month = January; unknown end month = December. For "Present" tick "currently work here" or leave the end
+    date empty.
+  years_with_technology_rule: >-
+    Years with a specific technology: if it is in the profile skills/projects, answer with the total experience
+    (never more). If it is not in the profile at all: 0 / "less than 1 year" only when such an option exists,
+    otherwise UNKNOWN.
+  relocation_assistance: >-
+    Roles outside India: Yes, relocation support would help but is not a dealbreaker. Roles in India: No, I can
+    relocate on my own.
+  English proficiency level: Fluent / professional working proficiency
+
+# Short true stories in your own words, used for behavioural questions ("tell us about a time..."). Only add
+# stories you'd tell in an interview; the agent reuses them, it never makes new ones up.
+stories:
+  shipped_under_pressure:
+    use_for: deadlines / ownership / handling an incident
+    confirmed_by_candidate: true
+    story: >-
+      Write a real story here in first person, the way you'd say it out loud.
+
+resume_path: assets/resume.pdf
